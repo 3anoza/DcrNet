@@ -3,7 +3,7 @@ This is a community library to work with the LibertyPlayer .dcr format
 
 Available futures:
 - ConvertToWAV
-- ConvertToMP3
+- ConvertToMP3 (Unsupported after version 1.4.0)
 
 Note:
 
