@@ -1,223 +1,106 @@
-﻿using DcrLib.Models;
-using NAudio.Wave;
-using NSpeex;
-using System.Text;
+﻿using NSpeex;
+using WaveFormat = DcrNet.Models.WaveFormat;
 
-namespace DcrLib.Services;
+namespace DcrNet.Services;
 
 public class SpeexConverter
 {
-    public static List<byte[]> GetPcmAudioForAllChannels(List<byte[]>? speexData, DcrAudioFormat audioFormat, int packetSize)
+    /// <summary>
+    ///     Decodes speex frames into pcm frames and store each channel into separate file
+    /// </summary>
+    /// <param name="speexDataFile">file with only speex-related data</param>
+    /// <param name="audioFormat">information for related speex data</param>
+    /// <returns>paths to pcm data files for each channel</returns>
+    public List<string> ExtractPcmAudioForEachChannel(string speexDataFile, WaveFormat audioFormat)
     {
-        List<byte[]> output = new List<byte[]>();
+        Console.WriteLine("[DCR_LIB]: Started PCM decoding for speex frames");
+        var output = new List<string>();
 
-        if (speexData == null || speexData.Count == 0)
+        var chunkSize = audioFormat.FrameSize * audioFormat.Channels;
+        using var speexStream = new FileStream(speexDataFile, FileMode.Open, FileAccess.Read);
+
+        var channelStreams = InitializeStreamsWithDecoders(audioFormat.Channels, audioFormat.ChannelMode, output);
+
+        var quarterPartOfChunks = GetChunksMultiplier(chunkSize, speexStream.Length);
+
+        var buffer = new byte[chunkSize * quarterPartOfChunks];
+        var frame = new byte[audioFormat.FrameSize];
+        var bytesRead = 0;
+        Console.WriteLine("[DCR_LIB]: Started speex stream reading.");
+        while ((bytesRead = speexStream.Read(buffer, 0, buffer.Length)) > 0)
+            for (var channelIndex = 0; channelIndex < channelStreams.Count; channelIndex++)
+            for (var frameIndex = 0; frameIndex < quarterPartOfChunks; frameIndex++)
+                DecodeAndStoreFrames(
+                    channelStreams[channelIndex],
+                    buffer,
+                    frame,
+                    channelIndex,
+                    frameIndex,
+                    chunkSize,
+                    audioFormat.PcmFrameSize,
+                    audioFormat.FramesPerPacket);
+
+        foreach (var channelStream in channelStreams)
         {
-            Console.WriteLine("Audio data is empty!");
+            channelStream.stream.Close();
+            channelStream.stream.Dispose();
         }
 
-        List<byte> channelDataBuffer = new List<byte>();
-
-        for (int i = 0; i < audioFormat.Channels; i++)
-        {
-            SpeexDecoder decoder = new SpeexDecoder(audioFormat.ChannelMode);
-
-            foreach (var speexFrame in speexData)
-            {
-                var chunkToDecode = speexFrame.Skip(i * packetSize)
-                                                    .Take(packetSize)
-                                                    .ToArray();
-                short[] decodedSamples = new short[audioFormat.PcmFrameSize * audioFormat.FramesPerPacket];
-
-                decoder.Decode(chunkToDecode, 0, chunkToDecode.Length, decodedSamples, 0, false);
-
-                byte[] pcmBytes = new byte[decodedSamples.Length * 2];
-                Buffer.BlockCopy(decodedSamples, 0, pcmBytes, 0, decodedSamples.Length * 2);
-
-                channelDataBuffer.AddRange(pcmBytes);
-            }
-            output.Add(channelDataBuffer.ToArray());
-            channelDataBuffer.Clear();
-        }
-
-        //List<SpeexDecoder> channelDecoders = new List<SpeexDecoder>();
-        //for (int i = 0; i < audioFormat.Channels; i++)
-        //{
-        //    SpeexDecoder decoder = new SpeexDecoder(audioFormat.ChannelMode);
-        //    channelDecoders.Add(decoder);
-        //}
-
-        //List<byte[]> currentPcmChunk = new List<byte[]>();
-
-
-
-        //foreach (var speexFrame in speexData)
-        //{
-        //    var channelsFrames = speexFrame.Chunk(packetSize).ToList();
-        //    for (int i = 0; i < channelDecoders.Count; i++)
-        //    {
-        //        short[] decoded = new short[audioFormat.PcmFrameSize * audioFormat.FramesPerPacket];
-        //        channelDecoders[i].Decode(channelsFrames[i], 0, packetSize, decoded, 0, false);
-
-        //        byte[] decodedFramesBytes = new byte[decoded.Length * 2];
-        //        Buffer.BlockCopy(decoded, 0, decodedFramesBytes, 0, decoded.Length * 2);
-        //        currentPcmChunk.Add(decodedFramesBytes);
-        //    }
-        //    output.Add(currentPcmChunk.SelectMany(chunk => chunk).ToArray());
-        //    currentPcmChunk.Clear();
-        //}
-
-        //List<byte[]> currentFrameBlock = new List<byte[]>();
-        //int FrameIndex = 0;
-        //bool[] channelSilence = Enumerable.Repeat(true, audioFormat.Channels).ToArray();
-        //foreach (byte[] frame in speexData)
-        //{
-        //    short[] decoded = new short[audioFormat.PcmFrameSize * audioFormat.FramesPerPacket];
-        //    ChannelDecoders.ElementAt(FrameIndex % audioFormat.Channels).Decode(frame, 0, packetSize, decoded, 0, false);
-
-        //    byte[] decodedFramesBytes = new byte[decoded.Length * 2];
-        //    Buffer.BlockCopy(decoded, 0, decodedFramesBytes, 0, decoded.Length * 2);
-
-        //    currentFrameBlock.Add(decodedFramesBytes);
-
-        //    if (currentFrameBlock.Count == audioFormat.Channels)
-        //    {
-        //        byte[] InterleavedAndDecodedBlock;
-
-        //        if (audioFormat.Channels == 1)
-        //            InterleavedAndDecodedBlock = currentFrameBlock.ElementAt(0);
-        //        else
-        //            InterleavedAndDecodedBlock = InterleaveFrames(currentFrameBlock);
-
-        //        output.Add(InterleavedAndDecodedBlock);
-
-        //        currentFrameBlock = new List<byte[]>();
-        //    }
-        //    FrameIndex++;
-        //}
-
+        Console.WriteLine("[DCR_LIB]: PCM decoding finished");
         return output;
     }
 
-    private static byte[] InterleaveFrames(List<byte[]> frames)
+    private List<(FileStream stream, SpeexDecoder decoder)> InitializeStreamsWithDecoders(int channels,
+        BandMode channelMode, List<string> streamPaths)
     {
-        int outputSize = frames.First().Length * frames.Count;
-        int numberOfSamplesInFrame = frames.First().Length / 2;
-        byte[] output = new byte[outputSize];
+        Console.WriteLine($"[DCR_LIB]: Initializing {channels} streams with decoders.");
 
-        int sampleCounter = 0;
+        var channelStreams = new List<(FileStream stream, SpeexDecoder decoder)>();
 
-        for (int seampleInFrame = 0; seampleInFrame < numberOfSamplesInFrame; seampleInFrame++)
+        for (var ch = 0; ch < channels; ch++)
         {
-            foreach (byte[] frame in frames)
-            {
-                for (int byteNumberInSample = 0; byteNumberInSample < 2; byteNumberInSample++)
-                {
-                    int indexOfStartingByteInCurrentFrame = seampleInFrame * 2;
-                    int indexOfCurrentByteToCopy = indexOfStartingByteInCurrentFrame + byteNumberInSample;
-
-                    output[sampleCounter++] = frame[indexOfCurrentByteToCopy];
-                }
-            }
+            var path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}_{ch + 1}.pcm");
+            channelStreams.Add(new ValueTuple<FileStream, SpeexDecoder>(
+                new FileStream(path, FileMode.Create, FileAccess.Write),
+                new SpeexDecoder(channelMode))
+            );
+            streamPaths.Add(path);
         }
 
-        return output;
+        Console.WriteLine("[DCR_LIB]: Streams and decoders are created.");
+
+        return channelStreams;
     }
 
-    public static List<byte[]> GetPcmAudio(List<byte[]>? speexData, DcrAudioFormat audioFormat, int channels, int packetSize)
+    private long GetChunksMultiplier(int chunkSize, long speexStreamLength)
     {
-        List<byte[]> output = new List<byte[]>();
+        var chunksAmount = speexStreamLength / chunkSize;
+        var chunksMultiplier = (long)(chunksAmount * 0.25f);
+        Console.WriteLine(
+            $"[DCR_LIB]: Approximate chunks amount: {chunksAmount}. Speeding up the process by taking 25% ({chunksMultiplier}) of chunks/reading.");
+        return chunksMultiplier;
+    }
 
-        if (speexData == null || speexData.Count == 0)
-        {
-            Console.WriteLine("Audio data is empty!");
-        }
+    private void DecodeAndStoreFrames((FileStream stream, SpeexDecoder decoder) channel, byte[] buffer,
+        byte[] frameBuffer, int channelIndex, int frameIndex, int chunkSize, int pcmFrameSize, int framesPerPacket)
+    {
+        var frameOffset = channelIndex * frameBuffer.Length + frameIndex * chunkSize;
+        // Take frame from buffer for specified channel
+        Array.Copy(buffer, frameOffset, frameBuffer, 0, frameBuffer.Length);
+        var pcmFrame = DecodeSpeexFrame(channel.decoder, pcmFrameSize, framesPerPacket, frameBuffer);
 
-        SpeexDecoder decoder = new SpeexDecoder(audioFormat.ChannelMode);
+        channel.stream.Write(pcmFrame, 0, pcmFrame.Length);
+    }
 
-        foreach (var speexFrame in speexData)
-        {
-            var firstChannelFrame = speexFrame.Chunk(packetSize).Take(1);
-            short[] pcmFrame = new short[audioFormat.PcmFrameSize * audioFormat.FramesPerPacket];
+    private byte[] DecodeSpeexFrame(SpeexDecoder decoder, int pcmFrameSize, int framesPerPacket,
+        byte[] speexFrame)
+    {
+        var decodedFrame = new short[pcmFrameSize * framesPerPacket];
+        decoder.Decode(speexFrame, 0, speexFrame.Length, decodedFrame, 0, false);
+        var pcmBytes = new byte[decodedFrame.Length * 2];
+        //Array.Copy(decodedFrame, 0, pcmBytes, 0,decodedFrame.Length * 2);
+        Buffer.BlockCopy(decodedFrame, 0, pcmBytes, 0, decodedFrame.Length * 2);
 
-            foreach (var firstFrame in firstChannelFrame)
-            {
-                var status = decoder.Decode(firstFrame, 0, firstFrame.Length, pcmFrame, 0, false);
-
-                Console.WriteLine($"Samples read: {status}");
-
-                byte[] pcmFrameBytes = new byte[pcmFrame.Length * 2];
-                Buffer.BlockCopy(pcmFrame, 0, pcmFrameBytes, 0, pcmFrameBytes.Length);
-
-                output.Add(pcmFrameBytes);
-                break;
-            }
-        }
-
-        //SpeexDecoder decoder = new SpeexDecoder(speexMode);
-
-        //foreach (var speexFrame in speexData)
-        //{
-        //    var actualFrames = speexFrame.Chunk(119).Take(1);
-
-        //    foreach (var actualFrame in actualFrames)
-        //    {
-        //        short[] decodedBuffer = new short[decoder.FrameSize];
-
-        //        Console.WriteLine($"ActFrameSize={actualFrame.Length}, BufferSize={decodedBuffer.Length}");
-
-        //        //var status = decoder.Decode(actualFrame, 0, actualFrame.Length - 1, decodedBuffer);
-
-        //        var status = decoder.DecodeInt(actualFrame, decodedBuffer);
-
-        //        Console.WriteLine($"Decode status {status}");
-
-        //        if (status < 0)
-        //            continue;
-
-        //        output.AddRange(decodedBuffer);
-        //    }
-
-        //foreach (var actualFrame in actualFrames)
-        //{
-
-
-        //}
-
-
-        //if (speexFrame.Length > 1666)
-        //{
-        //    var chunks = speexFrame.Chunk(1666).ToList();
-        //    foreach (var chunk in chunks)
-        //    {
-        //        Console.WriteLine($"FrameSize={speexFrame.Length}, BufferSize={decodedBuffer.Length}");
-
-        //        var status = decoder.Decode(chunk, 0, chunk.Length, decodedBuffer);
-
-        //        Console.WriteLine($"Decode status {status}");
-
-        //        if (status < 0)
-        //            continue;
-
-
-        //        output.AddRange(decodedBuffer);
-        //    }
-        //}
-        //else
-        //{
-        //    Console.WriteLine($"FrameSize={speexFrame.Length}, BufferSize={decodedBuffer.Length}");
-
-        //    var status = decoder.Decode(speexFrame, 0, speexFrame.Length, decodedBuffer);
-
-        //    Console.WriteLine($"Decode status {status}");
-
-        //    if (status < 0)
-        //        continue;
-
-        //    output.AddRange(decodedBuffer);
-        //}
-    //}
-
-        return output;
+        return pcmBytes;
     }
 }
