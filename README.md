@@ -1,5 +1,6 @@
 # DcrNet
 This is a community library to work with the LibertyPlayer .dcr format.
+
 All code was created using reverse-engineering and files structure analyzation
 
 Available futures:
